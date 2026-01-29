@@ -8,41 +8,80 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
+/* ================= CONFIG ================= */
+
+const PORT = process.env.PORT || 3001;
+
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'https://web.messagram.pp.ua',
+  'https://messagram-server.onrender.com'
+];
+
+/* ================= APP ================= */
+
 const app = express();
 const server = http.createServer(app);
 
 /* ================= MIDDLEWARE ================= */
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://web.messagram.pp.ua'
-  ],
+  origin: ALLOWED_ORIGINS,
   credentials: true
 }));
+
 app.use(express.json());
 
-/* ================= FILES ================= */
+/* ================= FILE STORAGE ================= */
+
 const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir);
+}
 
 app.use('/uploads', express.static(uploadsDir));
 
-/* ================= MULTER ================= */
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, uploadsDir),
   filename: (_, file, cb) =>
     cb(null, Date.now() + path.extname(file.originalname))
 });
+
 const upload = multer({ storage });
 
+/* ================= DATABASE ================= */
+
+const db = new sqlite3.Database('./messagram.db');
+
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE,
+      password TEXT,
+      avatar_url TEXT DEFAULT 'https://cdn-icons-png.flaticon.com/512/149/149071.png'
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      text TEXT,
+      sender_username TEXT,
+      receiver_username TEXT,
+      timestamp TEXT,
+      type TEXT,
+      file_url TEXT
+    )
+  `);
+});
+
 /* ================= SOCKET.IO ================= */
+
 const io = new Server(server, {
+  path: '/socket.io',
   cors: {
-    origin: [
-      'http://localhost:5173',
-      'https://web.messagram.pp.ua'
-    ],
-    methods: ['GET', 'POST'],
+    origin: ALLOWED_ORIGINS,
     credentials: true
   }
 });
@@ -75,13 +114,14 @@ io.on('connection', (socket) => {
 
     db.run(
       `
-      INSERT INTO messages (text, sender_username, receiver_username, timestamp, type, file_url)
+      INSERT INTO messages
+      (text, sender_username, receiver_username, timestamp, type, file_url)
       VALUES (?, ?, ?, ?, ?, ?)
       `,
       [
-        msg.text,
+        msg.text || '',
         msg.sender_username,
-        msg.receiver_username,
+        msg.receiver_username || null,
         time,
         msg.type || 'text',
         msg.file_url || null
@@ -98,33 +138,8 @@ io.on('connection', (socket) => {
   });
 });
 
-/* ================= DATABASE ================= */
-const db = new sqlite3.Database('./messagram.db');
-
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE,
-      password TEXT,
-      avatar_url TEXT DEFAULT 'https://cdn-icons-png.flaticon.com/512/149/149071.png'
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      text TEXT,
-      sender_username TEXT,
-      receiver_username TEXT,
-      timestamp TEXT,
-      type TEXT,
-      file_url TEXT
-    )
-  `);
-});
-
 /* ================= AUTH ================= */
+
 app.post('/register', async (req, res) => {
   let { username, password } = req.body;
 
@@ -162,20 +177,48 @@ app.post('/login', (req, res) => {
   );
 });
 
+/* ================= USER SEARCH ================= */
+
+app.get('/users/search', (req, res) => {
+  const { q, current } = req.query;
+
+  if (!q) return res.json([]);
+
+  db.all(
+    `
+    SELECT username, avatar_url
+    FROM users
+    WHERE username LIKE ?
+      AND username != ?
+    LIMIT 20
+    `,
+    [`%${q.toLowerCase()}%`, current],
+    (err, rows) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json([]);
+      }
+      res.json(rows);
+    }
+  );
+});
+
 /* ================= UPLOAD ================= */
+
 app.post('/upload', upload.single('file'), (req, res) => {
   res.json({
     url: `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`
   });
 });
 
-/* ================= HEALTH CHECK ================= */
+/* ================= HEALTH ================= */
+
 app.get('/', (_, res) => {
   res.json({ status: 'ok' });
 });
 
 /* ================= START ================= */
-const PORT = process.env.PORT || 3001;
+
 server.listen(PORT, () => {
   console.log('🚀 Server running on port', PORT);
 });
